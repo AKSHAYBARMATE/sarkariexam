@@ -2,11 +2,11 @@ pipeline {
     agent any
 
     environment {
-        COMPOSE_FILE = "docker-compose.feeservice.yml"
+        COMPOSE_FILE = "docker-compose.sarkaripariksha.yml"
         REGISTRY_CONTAINER_NAME = "serviceregistry"
-        TARGET_SERVICE = "feeservice"
-        TARGET_CONTAINER_NAME = "feeservice"
-        TARGET_IMAGE_NAME = "feeservice:latest"
+        TARGET_SERVICE = "sarkaripariksha"
+        TARGET_CONTAINER_NAME = "sarkaripariksha"
+        TARGET_IMAGE_NAME = "sarkaripariksha:latest"
     }
 
     stages {
