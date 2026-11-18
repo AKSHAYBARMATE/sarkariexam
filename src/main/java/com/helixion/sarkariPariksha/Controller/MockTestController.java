@@ -1,7 +1,9 @@
 package com.helixion.sarkariPariksha.Controller;
 
 import com.helixion.sarkariPariksha.Request.MockTestRequest;
+import com.helixion.sarkariPariksha.Request.MockTestSubmissionRequest;
 import com.helixion.sarkariPariksha.Response.MockTestResponse;
+import com.helixion.sarkariPariksha.Response.MockTestSubmissionResponse;
 import com.helixion.sarkariPariksha.Services.MockTestServices;
 import com.helixion.sarkariPariksha.Utils.BaseResponse;
 import io.swagger.v3.oas.annotations.Operation;
@@ -59,5 +61,17 @@ public class MockTestController {
     @Operation(summary = "Delete (Deactivate) Mock Test By ID", description = "Deactivates a mock test by its ID.")
     public BaseResponse<String> deleteMockTestById(@PathVariable Long id) {
         return mockTestServices.deleteMockTestById(id);
+    }
+
+    @PostMapping("/submitResponse")
+    @Operation(summary = "Submit Mock Test Paper Response (Batch)", description = "Submits all question responses for a mock test in a single request. Evaluates candidate answers, matches options, calculates marks, and saves under the logged-in candidate.")
+    public BaseResponse<MockTestSubmissionResponse> submitMockTestResponse(@RequestBody MockTestSubmissionRequest request) {
+        return mockTestServices.submitMockTest(request);
+    }
+
+    @GetMapping("/getResult/{attemptId}")
+    @Operation(summary = "Get Mock Test Attempt Result", description = "Fetches the full result breakdown and question-by-question review for an attempt.")
+    public BaseResponse<MockTestSubmissionResponse> getAttemptResult(@PathVariable Long attemptId) {
+        return mockTestServices.getAttemptResult(attemptId);
     }
 }

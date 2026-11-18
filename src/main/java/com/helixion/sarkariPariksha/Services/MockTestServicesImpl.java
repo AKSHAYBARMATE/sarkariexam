@@ -1,24 +1,27 @@
 package com.helixion.sarkariPariksha.Services;
 
-import com.helixion.sarkariPariksha.Entity.ExamMaster;
-import com.helixion.sarkariPariksha.Entity.MockTestMaster;
-import com.helixion.sarkariPariksha.Entity.TestSeries;
-import com.helixion.sarkariPariksha.Repository.ExamRepository;
-import com.helixion.sarkariPariksha.Repository.MockTestAttemptRepository;
-import com.helixion.sarkariPariksha.Repository.MockTestRepository;
-import com.helixion.sarkariPariksha.Repository.TestSeriesRepository;
+import com.helixion.sarkariPariksha.Entity.*;
+import com.helixion.sarkariPariksha.Repository.*;
 import com.helixion.sarkariPariksha.Request.MockTestRequest;
+import com.helixion.sarkariPariksha.Request.MockTestSubmissionRequest;
+import com.helixion.sarkariPariksha.Request.QuestionAnswerRequest;
 import com.helixion.sarkariPariksha.Response.MockTestResponse;
+import com.helixion.sarkariPariksha.Response.MockTestSubmissionResponse;
+import com.helixion.sarkariPariksha.Response.QuestionResultResponse;
+import com.helixion.sarkariPariksha.Security.CustomUserDetails;
+import com.helixion.sarkariPariksha.Security.LoginUser;
+import com.helixion.sarkariPariksha.Security.LoginUserContext;
 import com.helixion.sarkariPariksha.Utils.BaseResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Optional;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -35,6 +38,18 @@ public class MockTestServicesImpl implements MockTestServices {
 
     @Autowired
     private MockTestAttemptRepository mockTestAttemptRepository;
+
+    @Autowired
+    private CandidatesRepository candidatesRepository;
+
+    @Autowired
+    private QuestionRepository questionRepository;
+
+    @Autowired
+    private QuestionOptionRepository questionOptionRepository;
+
+    @Autowired
+    private MockTestQuestionAttemptRepository mockTestQuestionAttemptRepository;
 
     @Override
     public BaseResponse<MockTestResponse> saveMockTest(MockTestRequest mockTestRequest) {
@@ -389,5 +404,367 @@ public class MockTestServicesImpl implements MockTestServices {
         response.setTotalCandidatesAttempted(candidates != null ? candidates : 0L);
 
         return response;
+    }
+
+    @Override
+    @Transactional
+    public BaseResponse<MockTestSubmissionResponse> submitMockTest(MockTestSubmissionRequest request) {
+        BaseResponse<MockTestSubmissionResponse> baseResponse = new BaseResponse<>();
+        try {
+            if (request == null || request.getMockTestId() == null) {
+                baseResponse.setStatus(0);
+                baseResponse.setCode(400);
+                baseResponse.setMessage("Mock test ID is required");
+                return baseResponse;
+            }
+
+            // 1. Get Candidate from LoginUserContext (or SecurityContext fallback)
+            LoginUser loginUser = LoginUserContext.getLoginUser();
+            Long candidateId = loginUser != null ? loginUser.getCandidateId() : null;
+            Long userId = loginUser != null ? loginUser.getUserId() : null;
+
+            if (loginUser == null) {
+                Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+                if (auth != null && auth.getPrincipal() instanceof CustomUserDetails cud) {
+                    candidateId = cud.getCandidateId();
+                    userId = cud.getUserId();
+                }
+            }
+
+            CandidateProfile candidate = null;
+            if (candidateId != null) {
+                candidate = candidatesRepository.findById(candidateId).orElse(null);
+            }
+            if (candidate == null && userId != null) {
+                candidate = candidatesRepository.findByUserId(userId).orElse(null);
+            }
+
+            if (candidate == null) {
+                baseResponse.setStatus(0);
+                baseResponse.setCode(401);
+                baseResponse.setMessage("Candidate profile not found for logged in user. Please log in first.");
+                return baseResponse;
+            }
+
+            // 2. Fetch Mock Test
+            Optional<MockTestMaster> mockTestOpt = mockTestRepository.findById(request.getMockTestId());
+            if (mockTestOpt.isEmpty()) {
+                baseResponse.setStatus(0);
+                baseResponse.setCode(404);
+                baseResponse.setMessage("Mock test not found with ID: " + request.getMockTestId());
+                return baseResponse;
+            }
+            MockTestMaster mockTest = mockTestOpt.get();
+
+            // 3. Determine attempt number for this candidate
+            Integer previousAttempts = mockTestAttemptRepository.countByCandidate_IdAndMockTest_Id(candidate.getId(), mockTest.getId());
+            int attemptNumber = (previousAttempts != null ? previousAttempts : 0) + 1;
+
+            // 4. Fetch all questions and options for this mock test
+            List<QuestionMaster> allQuestions = questionRepository.findByMockTest_Id(mockTest.getId());
+            Map<Long, QuestionMaster> questionMap = allQuestions.stream()
+                    .collect(Collectors.toMap(QuestionMaster::getId, q -> q));
+
+            List<Long> questionIds = allQuestions.stream().map(QuestionMaster::getId).collect(Collectors.toList());
+            List<QuestionOption> allOptions = !questionIds.isEmpty()
+                    ? questionOptionRepository.findByQuestion_IdIn(questionIds)
+                    : Collections.emptyList();
+            Map<Long, List<QuestionOption>> optionsByQuestionId = allOptions.stream()
+                    .collect(Collectors.groupingBy(o -> o.getQuestion().getId()));
+
+            // 5. Evaluate responses
+            int totalAttempted = 0;
+            int totalCorrect = 0;
+            int totalIncorrect = 0;
+            int totalSkipped = 0;
+            double totalScore = 0.0;
+
+            MockTestAttempt attempt = new MockTestAttempt();
+            attempt.setCandidate(candidate);
+            attempt.setMockTest(mockTest);
+            attempt.setAttemptNumber(attemptNumber);
+            int timeTaken = (request.getTotalTimeTakenSeconds() != null) ? request.getTotalTimeTakenSeconds() : 0;
+            attempt.setStartTime(LocalDateTime.now().minusSeconds(timeTaken));
+            attempt.setSubmitTime(LocalDateTime.now());
+            attempt.setTotalTimeTakenSeconds(timeTaken);
+            attempt.setStatus("SUBMITTED");
+
+            List<MockTestQuestionAttempt> questionAttempts = new ArrayList<>();
+            List<QuestionResultResponse> questionResults = new ArrayList<>();
+            Set<Long> processedQuestionIds = new HashSet<>();
+
+            if (request.getAnswers() != null) {
+                for (QuestionAnswerRequest answer : request.getAnswers()) {
+                    if (answer.getQuestionId() == null) continue;
+                    processedQuestionIds.add(answer.getQuestionId());
+
+                    QuestionMaster question = questionMap.get(answer.getQuestionId());
+                    if (question == null) {
+                        question = questionRepository.findById(answer.getQuestionId()).orElse(null);
+                    }
+                    if (question == null) continue;
+
+                    List<QuestionOption> options = optionsByQuestionId.getOrDefault(question.getId(), Collections.emptyList());
+                    QuestionOption correctOption = options.stream()
+                            .filter(o -> Boolean.TRUE.equals(o.getCorrect()))
+                            .findFirst()
+                            .orElse(null);
+
+                    QuestionOption selectedOption = null;
+                    if (answer.getSelectedOptionId() != null) {
+                        selectedOption = options.stream()
+                                .filter(o -> o.getId().equals(answer.getSelectedOptionId()))
+                                .findFirst()
+                                .orElse(null);
+                    }
+
+                    MockTestQuestionAttempt qa = new MockTestQuestionAttempt();
+                    qa.setMockTestAttempt(attempt);
+                    qa.setQuestion(question);
+                    qa.setSelectedOption(selectedOption);
+                    qa.setTimeTakenSeconds(answer.getTimeTakenSeconds() != null ? answer.getTimeTakenSeconds() : 0);
+                    qa.setIsMarkedForReview(Boolean.TRUE.equals(answer.getIsMarkedForReview()));
+
+                    QuestionResultResponse qr = new QuestionResultResponse();
+                    qr.setQuestionId(question.getId());
+                    qr.setQuestionText(question.getQuestionText());
+                    qr.setTimeTakenSeconds(qa.getTimeTakenSeconds());
+                    qr.setExplanation(question.getExplanation());
+                    if (correctOption != null) {
+                        qr.setCorrectOptionId(correctOption.getId());
+                        qr.setCorrectOptionText(correctOption.getOptionText());
+                    }
+
+                    if (selectedOption != null) {
+                        totalAttempted++;
+                        boolean isCorrect = Boolean.TRUE.equals(selectedOption.getCorrect());
+                        qa.setIsCorrect(isCorrect);
+                        qr.setIsCorrect(isCorrect);
+                        qr.setSelectedOptionId(selectedOption.getId());
+                        qr.setSelectedOptionText(selectedOption.getOptionText());
+
+                        double marks = question.getMarks() != null ? question.getMarks() : 1.0;
+                        double negMarks = question.getNegativeMarks() != null
+                                ? question.getNegativeMarks()
+                                : (mockTest.getNegativeMark() != null ? mockTest.getNegativeMark().doubleValue() : 0.0);
+
+                        if (isCorrect) {
+                            totalCorrect++;
+                            qa.setMarksAwarded(marks);
+                            qa.setAttemptStatus("CORRECT");
+                            totalScore += marks;
+                        } else {
+                            totalIncorrect++;
+                            qa.setMarksAwarded(-negMarks);
+                            qa.setAttemptStatus("INCORRECT");
+                            totalScore -= negMarks;
+                        }
+                    } else {
+                        totalSkipped++;
+                        qa.setIsCorrect(null);
+                        qa.setMarksAwarded(0.0);
+                        qa.setAttemptStatus(answer.getAttemptStatus() != null ? answer.getAttemptStatus() : "SKIPPED");
+
+                        qr.setIsCorrect(null);
+                        qr.setSelectedOptionId(null);
+                        qr.setSelectedOptionText(null);
+                    }
+
+                    qr.setMarksAwarded(qa.getMarksAwarded());
+                    qr.setAttemptStatus(qa.getAttemptStatus());
+
+                    questionAttempts.add(qa);
+                    questionResults.add(qr);
+                }
+            }
+
+            // Include questions that were not present in request.getAnswers() as skipped
+            for (QuestionMaster q : allQuestions) {
+                if (!processedQuestionIds.contains(q.getId())) {
+                    totalSkipped++;
+                    List<QuestionOption> options = optionsByQuestionId.getOrDefault(q.getId(), Collections.emptyList());
+                    QuestionOption correctOption = options.stream()
+                            .filter(o -> Boolean.TRUE.equals(o.getCorrect()))
+                            .findFirst()
+                            .orElse(null);
+
+                    MockTestQuestionAttempt qa = new MockTestQuestionAttempt();
+                    qa.setMockTestAttempt(attempt);
+                    qa.setQuestion(q);
+                    qa.setSelectedOption(null);
+                    qa.setTimeTakenSeconds(0);
+                    qa.setIsCorrect(null);
+                    qa.setIsMarkedForReview(false);
+                    qa.setAttemptStatus("SKIPPED");
+                    qa.setMarksAwarded(0.0);
+                    questionAttempts.add(qa);
+
+                    QuestionResultResponse qr = new QuestionResultResponse();
+                    qr.setQuestionId(q.getId());
+                    qr.setQuestionText(q.getQuestionText());
+                    qr.setSelectedOptionId(null);
+                    qr.setSelectedOptionText(null);
+                    if (correctOption != null) {
+                        qr.setCorrectOptionId(correctOption.getId());
+                        qr.setCorrectOptionText(correctOption.getOptionText());
+                    }
+                    qr.setIsCorrect(null);
+                    qr.setMarksAwarded(0.0);
+                    qr.setTimeTakenSeconds(0);
+                    qr.setAttemptStatus("SKIPPED");
+                    qr.setExplanation(q.getExplanation());
+                    questionResults.add(qr);
+                }
+            }
+
+            int totalQuestionsCount = !allQuestions.isEmpty() ? allQuestions.size() : questionAttempts.size();
+            Double totalMarksVal = mockTest.getTotalMarks() != null
+                    ? mockTest.getTotalMarks().doubleValue()
+                    : (double) totalQuestionsCount;
+            double percentage = (totalMarksVal > 0) ? (totalScore / totalMarksVal) * 100 : 0.0;
+            double accuracy = (totalAttempted > 0) ? ((double) totalCorrect / totalAttempted) * 100 : 0.0;
+
+            attempt.setTotalQuestions(totalQuestionsCount);
+            attempt.setTotalAttempted(totalAttempted);
+            attempt.setTotalCorrect(totalCorrect);
+            attempt.setTotalIncorrect(totalIncorrect);
+            attempt.setTotalSkipped(totalSkipped);
+            attempt.setScore(Math.round(totalScore * 100.0) / 100.0);
+            attempt.setTotalMarks(totalMarksVal);
+            attempt.setPercentage(Math.round(percentage * 100.0) / 100.0);
+            attempt.setAccuracy(Math.round(accuracy * 100.0) / 100.0);
+
+            MockTestAttempt savedAttempt = mockTestAttemptRepository.save(attempt);
+
+            for (MockTestQuestionAttempt qa : questionAttempts) {
+                qa.setMockTestAttempt(savedAttempt);
+            }
+            mockTestQuestionAttemptRepository.saveAll(questionAttempts);
+
+            // Build Response
+            MockTestSubmissionResponse response = new MockTestSubmissionResponse();
+            response.setAttemptId(savedAttempt.getId());
+            response.setMockTestId(mockTest.getId());
+            response.setMockTestName(mockTest.getTestName());
+            response.setCandidateId(candidate.getId());
+            response.setCandidateName(candidate.getFullName());
+            response.setAttemptNumber(attemptNumber);
+            response.setTotalQuestions(totalQuestionsCount);
+            response.setTotalAttempted(totalAttempted);
+            response.setTotalCorrect(totalCorrect);
+            response.setTotalIncorrect(totalIncorrect);
+            response.setTotalSkipped(totalSkipped);
+            response.setScore(savedAttempt.getScore());
+            response.setTotalMarks(totalMarksVal);
+            response.setPercentage(savedAttempt.getPercentage());
+            response.setAccuracy(savedAttempt.getAccuracy());
+            response.setTotalTimeTakenSeconds(savedAttempt.getTotalTimeTakenSeconds());
+            response.setStatus(savedAttempt.getStatus());
+            response.setSubmitTime(savedAttempt.getSubmitTime());
+            response.setQuestionResults(questionResults);
+
+            baseResponse.setStatus(1);
+            baseResponse.setCode(200);
+            baseResponse.setMessage("Mock test responses saved and evaluated successfully");
+            baseResponse.setData(Collections.singletonList(response));
+            return baseResponse;
+
+        } catch (Exception e) {
+            log.error("Error submitting mock test response: {}", e.getMessage(), e);
+            baseResponse.setStatus(0);
+            baseResponse.setCode(500);
+            baseResponse.setMessage("Failed to submit mock test response: " + e.getMessage());
+            return baseResponse;
+        }
+    }
+
+    @Override
+    public BaseResponse<MockTestSubmissionResponse> getAttemptResult(Long attemptId) {
+        BaseResponse<MockTestSubmissionResponse> baseResponse = new BaseResponse<>();
+        try {
+            if (attemptId == null) {
+                baseResponse.setStatus(0);
+                baseResponse.setCode(400);
+                baseResponse.setMessage("Attempt ID is required");
+                return baseResponse;
+            }
+
+            Optional<MockTestAttempt> attemptOpt = mockTestAttemptRepository.findById(attemptId);
+            if (attemptOpt.isEmpty()) {
+                baseResponse.setStatus(0);
+                baseResponse.setCode(404);
+                baseResponse.setMessage("Mock test attempt not found with ID: " + attemptId);
+                return baseResponse;
+            }
+            MockTestAttempt attempt = attemptOpt.get();
+
+            List<MockTestQuestionAttempt> questionAttempts = mockTestQuestionAttemptRepository.findByMockTestAttempt_Id(attemptId);
+            List<QuestionResultResponse> questionResults = new ArrayList<>();
+
+            for (MockTestQuestionAttempt qa : questionAttempts) {
+                QuestionResultResponse qr = new QuestionResultResponse();
+                if (qa.getQuestion() != null) {
+                    qr.setQuestionId(qa.getQuestion().getId());
+                    qr.setQuestionText(qa.getQuestion().getQuestionText());
+                    qr.setExplanation(qa.getQuestion().getExplanation());
+
+                    List<QuestionOption> options = questionOptionRepository.findByQuestion_Id(qa.getQuestion().getId());
+                    QuestionOption correctOption = options.stream()
+                            .filter(o -> Boolean.TRUE.equals(o.getCorrect()))
+                            .findFirst()
+                            .orElse(null);
+                    if (correctOption != null) {
+                        qr.setCorrectOptionId(correctOption.getId());
+                        qr.setCorrectOptionText(correctOption.getOptionText());
+                    }
+                }
+                if (qa.getSelectedOption() != null) {
+                    qr.setSelectedOptionId(qa.getSelectedOption().getId());
+                    qr.setSelectedOptionText(qa.getSelectedOption().getOptionText());
+                }
+                qr.setIsCorrect(qa.getIsCorrect());
+                qr.setMarksAwarded(qa.getMarksAwarded());
+                qr.setTimeTakenSeconds(qa.getTimeTakenSeconds());
+                qr.setAttemptStatus(qa.getAttemptStatus());
+                questionResults.add(qr);
+            }
+
+            MockTestSubmissionResponse response = new MockTestSubmissionResponse();
+            response.setAttemptId(attempt.getId());
+            if (attempt.getMockTest() != null) {
+                response.setMockTestId(attempt.getMockTest().getId());
+                response.setMockTestName(attempt.getMockTest().getTestName());
+            }
+            if (attempt.getCandidate() != null) {
+                response.setCandidateId(attempt.getCandidate().getId());
+                response.setCandidateName(attempt.getCandidate().getFullName());
+            }
+            response.setAttemptNumber(attempt.getAttemptNumber());
+            response.setTotalQuestions(attempt.getTotalQuestions());
+            response.setTotalAttempted(attempt.getTotalAttempted());
+            response.setTotalCorrect(attempt.getTotalCorrect());
+            response.setTotalIncorrect(attempt.getTotalIncorrect());
+            response.setTotalSkipped(attempt.getTotalSkipped());
+            response.setScore(attempt.getScore());
+            response.setTotalMarks(attempt.getTotalMarks());
+            response.setPercentage(attempt.getPercentage());
+            response.setAccuracy(attempt.getAccuracy());
+            response.setTotalTimeTakenSeconds(attempt.getTotalTimeTakenSeconds());
+            response.setStatus(attempt.getStatus());
+            response.setSubmitTime(attempt.getSubmitTime());
+            response.setQuestionResults(questionResults);
+
+            baseResponse.setStatus(1);
+            baseResponse.setCode(200);
+            baseResponse.setMessage("Mock test attempt result fetched successfully");
+            baseResponse.setData(Collections.singletonList(response));
+            return baseResponse;
+        } catch (Exception e) {
+            log.error("Error fetching attempt result: {}", e.getMessage(), e);
+            baseResponse.setStatus(0);
+            baseResponse.setCode(500);
+            baseResponse.setMessage("Failed to fetch attempt result: " + e.getMessage());
+            return baseResponse;
+        }
     }
 }

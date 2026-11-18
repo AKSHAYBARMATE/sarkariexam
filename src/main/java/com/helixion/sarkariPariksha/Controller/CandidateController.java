@@ -3,6 +3,7 @@ package com.helixion.sarkariPariksha.Controller;
 import com.helixion.sarkariPariksha.Entity.CandidateProfile;
 import com.helixion.sarkariPariksha.Request.CandidatesRequest;
 import com.helixion.sarkariPariksha.Response.CandidateProfileResponse;
+import com.helixion.sarkariPariksha.Security.LoginUser;
 import com.helixion.sarkariPariksha.Services.CandidateServices;
 import com.helixion.sarkariPariksha.Utils.BaseResponse;
 import io.swagger.v3.oas.annotations.Operation;
@@ -17,6 +18,8 @@ public class CandidateController {
 
     @Autowired
     private CandidateServices candidateServices;
+    @Autowired
+    private LoginUser loginUser;
 
     @PostMapping("/saveProfile")
     @Operation(summary = "Save or Update Candidate Profile", description = "Saves candidate personal, educational, and location details, and associates them with a user account.")
@@ -28,5 +31,10 @@ public class CandidateController {
     @Operation(summary = "Get Candidate Profile By ID", description = "Fetches candidate profile details by candidate ID")
     public BaseResponse<CandidateProfileResponse> getCandidateProfileById(@PathVariable Long id) {
         return candidateServices.getCandidateProfileById(id);
+    }
+    @GetMapping("/getProfileById")
+    @Operation(summary = "Get Candidate Profile By ID", description = "Fetches candidate profile details by candidate ID")
+    public BaseResponse<CandidateProfileResponse> getCandidateProfile() {
+        return candidateServices.getCandidateProfileById(loginUser.getCandidateId());
     }
 }
