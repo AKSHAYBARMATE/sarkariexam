@@ -4,15 +4,13 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.springframework.context.annotation.Scope;
-import org.springframework.stereotype.Component;
 
 import java.io.Serializable;
 
 @Data
-@Component
-@Scope
 @Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class LoginUser implements Serializable {
 
     private static final long serialVersionUID = 1L;
