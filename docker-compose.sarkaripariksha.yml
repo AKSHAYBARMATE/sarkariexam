@@ -1,12 +1,12 @@
 services:
-  feeservice:
+  sarkaripariksha:
     build:
       context: .
       dockerfile: Dockerfile
-    image: feeservice:latest
-    container_name: feeservice
+    image: sarkaripariksha:latest
+    container_name: sarkaripariksha
     ports:
-      - "8085:8085"
+      - "5050:5050"
     networks:
       - updated_orgadmin_rmscadminnetwork
     environment:
